@@ -132,10 +132,13 @@ jobs:
           file: ./publish/*
 
       # ===== 推送 release 分支 =====
+
       - name: Push to release branch
         run: |
-          cd publish
+          cd publish || exit 1
           git init
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b release
           git add .
           git commit -m "${{ env.RELEASE_NAME }}"

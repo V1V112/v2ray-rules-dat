@@ -142,6 +142,7 @@ jobs:
           git remote add origin "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
           git push -f origin release
 
+
       # ===== 刷新 CDN =====
       - name: Purge jsdelivr
         run: |

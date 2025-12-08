@@ -1,21 +1,25 @@
-name: Build V2Ray rules dat files
+name: 构建 V2Ray 规则数据文件
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # 允许手动触发工作流
   schedule:
-    - cron: "0 22 * * *"
+    - cron: "0 22 * * *"  # 每天 UTC 时间 22:00（北京时间次日 6:00）自动运行
   push:
     branches:
-      - master
+      - master  # 仅当推送到 master 分支时触发
     paths-ignore:
-      - "**/README.md"
+      - "**/README.md"  # 忽略 README.md 文件的更改
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # 在最新的 Ubuntu 运行器上执行
     steps:
-      - name: Set variables
+      - name: 设置变量
         run: |
-          echo "RELEASE_NAME=Released on $(date +%Y%m%d%H%M)" >> $GITHUB_ENV
+          echo "RELEASE_NAME=发布于 $(date +%Y%m%d%H%M)" >> $GITHUB_ENV
           echo "TAG_NAME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
+          # 定义需要强制加入代理列表的 v2fly 社区规则分类，用空格分隔
+          echo "CUSTOM_PROXY_GROUP=github pinterest" >> $GITHUB_ENV
+          
           echo "CHINA_DOMAINS_URL=https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/accelerated-domains.china.conf" >> $GITHUB_ENV
           echo "GOOGLE_DOMAINS_URL=https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/google.china.conf" >> $GITHUB_ENV
           echo "APPLE_DOMAINS_URL=https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/apple.china.conf" >> $GITHUB_ENV
@@ -30,83 +34,146 @@ jobs:
           echo "WIN_EXTRA=https://raw.githubusercontent.com/crazy-max/WindowsSpyBlocker/master/data/hosts/extra.txt" >> $GITHUB_ENV
         shell: bash
 
-      - name: Checkout the "hidden" branch of this repo
+      - name: 检出本仓库的 'hidden' 分支
         uses: actions/checkout@v6
         with:
           ref: hidden
 
-      - name: Checkout Loyalsoldier/domain-list-custom
+      - name: 检出 Loyalsoldier/domain-list-custom 仓库
         uses: actions/checkout@v6
         with:
           repository: Loyalsoldier/domain-list-custom
-          path: custom
+          path: custom  # 克隆到 custom 目录
 
-      - name: Checkout v2fly/domain-list-community
+      - name: 检出 v2fly/domain-list-community 仓库
         uses: actions/checkout@v6
         with:
           repository: v2fly/domain-list-community
-          path: community
+          path: community  # 克隆到 community 目录
 
-      - name: Checkout cokebar/gfwlist2dnsmasq
+      - name: 检出 cokebar/gfwlist2dnsmasq 仓库
         uses: actions/checkout@v6
         with:
           repository: cokebar/gfwlist2dnsmasq
-          path: gfwlist2dnsmasq
+          path: gfwlist2dnsmasq  # 克隆到 gfwlist2dnsmasq 目录
 
-      - name: Setup Go
+      - name: 设置 Go 环境
         uses: actions/setup-go@v6
         with:
           go-version-file: ./custom/go.mod
           cache-dependency-path: ./custom/go.sum
 
-      - name: Get geoip.dat relative files
+      - name: 获取 geoip.dat 相关文件
         run: |
           wget https://github.com/Loyalsoldier/geoip/raw/release/geoip.dat
           wget https://github.com/Loyalsoldier/geoip/raw/release/geoip.dat.sha256sum
 
-      - name: Generate GFWList domains
+      - name: 创建用于递归处理 include 的 Python 脚本
+        run: |
+          cat << 'EOF' > resolve-includes.py
+          import sys
+          import os
+
+          # 用法: python3 resolve-includes.py <基础目录> <文件名>
+          # 示例: python3 resolve-includes.py ./community/data github
+
+          if len(sys.argv) < 3:
+              print("用法: python3 resolve-includes.py <基础目录> <文件名>")
+              sys.exit(1)
+
+          base_dir = sys.argv[1]
+          entry_file = sys.argv[2]
+          seen = set()
+
+          def resolve(filename):
+              if filename in seen:
+                  return
+              seen.add(filename)
+              
+              filepath = os.path.join(base_dir, filename)
+              if not os.path.exists(filepath):
+                  # 文件可能不存在（例如，被误认为是文件名的标准域名行，或上游缺失），安全跳过
+                  return
+
+              with open(filepath, 'r', encoding='utf-8') as f:
+                  for line in f:
+                      line = line.strip()
+                      if not line or line.startswith('#'):
+                          continue
+                      
+                      # 处理 include: 指令
+                      if line.startswith('include:'):
+                          include_name = line.split(':', 1)[1].strip()
+                          resolve(include_name)
+                      else:
+                          print(line)
+
+          resolve(entry_file)
+          EOF
+          chmod +x resolve-includes.py
+
+      - name: 生成 GFWList 域名列表
         run: |
           cd gfwlist2dnsmasq || exit 1
           chmod +x ./gfwlist2dnsmasq.sh
           ./gfwlist2dnsmasq.sh -l -o ./temp-gfwlist.txt
 
-      - name: Get and add direct domains into temp-direct.txt file
+      - name: 获取并添加直连域名到 temp-direct.txt 文件
         run: |
           curl -sSL $CHINA_DOMAINS_URL | perl -ne '/^server=\/([^\/]+)\// && print "$1\n"' > temp-direct.txt
           curl -sSL ${CUSTOM_DIRECT} | perl -ne '/^(domain):([^:]+)(\n$|:@.+)/ && print "$2\n"' >> temp-direct.txt
 
-      - name: Get and add proxy domains into temp-proxy.txt file
+      - name: 从自定义列表中保留 `full`、`regexp` 和 `keyword` 类型规则到 "reserve" 文件
         run: |
+          curl -sSL ${CUSTOM_DIRECT} | perl -ne '/^((full|regexp|keyword):[^:]+)(\n$|:@.+)/ && print "$1\n"' | sort --ignore-case -u > direct-reserve.txt
+          curl -sSL ${CUSTOM_PROXY} | grep -Ev ":@cn" | perl -ne '/^((full|regexp|keyword):[^:]+)(\n$|:@.+)/ && print "$1\n"' | sort --ignore-case -u > proxy-reserve.txt
+
+      - name: 获取并添加代理域名到 temp-proxy.txt 文件
+        run: |
+          # 1. GFWList
           cat ./gfwlist2dnsmasq/temp-gfwlist.txt | perl -ne '/^((?=^.{3,255})[a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})+)/ && print "$1\n"' > temp-proxy.txt
+          
+          # 2. 谷歌和苹果中国域名列表（作为代理）
           curl -sSL $GOOGLE_DOMAINS_URL | perl -ne '/^server=\/([^\/]+)\// && print "$1\n"' >> temp-proxy.txt
           curl -sSL $APPLE_DOMAINS_URL | perl -ne '/^server=\/([^\/]+)\// && print "$1\n"' >> temp-proxy.txt
+          
+          # 3. 从 URL 获取的自定义代理列表
           curl -sSL ${CUSTOM_PROXY} | grep -Ev ":@cn" | perl -ne '/^(domain):([^:]+)(\n$|:@.+)/ && print "$2\n"' >> temp-proxy.txt
 
-      - name: Get and add reject domains into temp-reject.txt file
+          # 4. 处理自定义代理分类（如 GitHub, Pinterest）的递归包含
+          # 此步骤处理包含 "include:" 指令的文件
+          touch temp-custom-v2fly.txt
+          for category in $CUSTOM_PROXY_GROUP; do
+            echo "正在处理分类: $category"
+            python3 resolve-includes.py ./community/data "$category" >> temp-custom-v2fly.txt
+          done
+          
+          # 4.1 从自定义 v2fly 分类中提取纯域名到 temp-proxy.txt
+          cat temp-custom-v2fly.txt | perl -ne '/^((?=^.{3,255})[a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})+)$/ && print "$1\n"' >> temp-proxy.txt
+          
+          # 4.2 从自定义 v2fly 分类中提取特殊规则（full, regexp, keyword）到 proxy-reserve.txt
+          cat temp-custom-v2fly.txt | perl -ne '/^((full|regexp|keyword):[^:]+)(\n$|:@.+)/ && print "$1\n"' >> proxy-reserve.txt
+
+      - name: 获取并添加拒绝域名到 temp-reject.txt 文件
         run: |
           curl -sSL $EASYLISTCHINA_EASYLIST_REJECT_URL | perl -ne '/^\|\|([-_0-9a-zA-Z]+(\.[-_0-9a-zA-Z]+){1,64})\^$/ && print "$1\n"' | perl -ne 'print if not /^[0-9]{1,3}(\.[0-9]{1,3}){3}$/' > temp-reject.txt
           curl -sSL $ADGUARD_DNS_REJECT_URL | perl -ne '/^\|\|([-_0-9a-zA-Z]+(\.[-_0-9a-zA-Z]+){1,64})\^$/ && print "$1\n"' | perl -ne 'print if not /^[0-9]{1,3}(\.[0-9]{1,3}){3}$/' >> temp-reject.txt
           curl -sSL $PETERLOWE_REJECT_URL | perl -ne '/^127\.0\.0\.1\s([-_0-9a-zA-Z]+(\.[-_0-9a-zA-Z]+){1,64})$/ && print "$1\n"' >> temp-reject.txt
           curl -sSL $DANPOLLOCK_REJECT_URL | perl -ne '/^127\.0\.0\.1\s([-_0-9a-zA-Z]+(\.[-_0-9a-zA-Z]+){1,64})/ && print "$1\n"' | sed '1d' >> temp-reject.txt
 
-      - name: Reserve `full`, `regexp` and `keyword` type of rules from custom lists to "reserve" files
-        run: |
-          curl -sSL ${CUSTOM_DIRECT} | perl -ne '/^((full|regexp|keyword):[^:]+)(\n$|:@.+)/ && print "$1\n"' | sort --ignore-case -u > direct-reserve.txt
-          curl -sSL ${CUSTOM_PROXY} | grep -Ev ":@cn" | perl -ne '/^((full|regexp|keyword):[^:]+)(\n$|:@.+)/ && print "$1\n"' | sort --ignore-case -u > proxy-reserve.txt
-
-      - name: Add proxy, direct and reject domains from "hidden" branch to appropriate temp files
+      - name: 将 'hidden' 分支中的代理、直连和拒绝域名添加到相应的临时文件
         run: |
           cat proxy.txt >> temp-proxy.txt
           cat direct.txt >> temp-direct.txt
           cat reject.txt >> temp-reject.txt
 
-      - name: Sort and generate redundant lists
+      - name: 排序并生成包含冗余的列表
         run: |
           cat temp-proxy.txt | sort --ignore-case -u > proxy-list-with-redundant
           cat temp-direct.txt | sort --ignore-case -u > direct-list-with-redundant
           cat temp-reject.txt | sort --ignore-case -u > reject-list-with-redundant
 
-      - name: Remove redundant domains
+      - name: 去除冗余域名
         run: |
           chmod +x findRedundantDomain.py
           ./findRedundantDomain.py ./direct-list-with-redundant ./direct-list-deleted-unsort
@@ -122,13 +189,13 @@ jobs:
           diff ./proxy-list-deleted-sort ./proxy-list-with-redundant | awk '/^>/{print $2}' > ./proxy-list-without-redundant
           diff ./reject-list-deleted-sort ./reject-list-with-redundant | awk '/^>/{print $2}' > ./reject-list-without-redundant
 
-      - name: Remove domains from "need-to-remove" lists in "hidden" branch
+      - name: 从 'hidden' 分支的 "need-to-remove" 列表中移除域名
         run: |
           diff ./direct-need-to-remove.txt ./direct-list-without-redundant | awk '/^>/{print $2}' > temp-cn.txt
           diff ./proxy-need-to-remove.txt ./proxy-list-without-redundant | awk '/^>/{print $2}' > temp-geolocation-\!cn.txt
           diff ./reject-need-to-remove.txt ./reject-list-without-redundant | awk '/^>/{print $2}' > temp-category-ads-all.txt
 
-      - name: Write lists to data directory
+      - name: 将列表写入 data 目录
         run: |
           cat temp-cn.txt | sort --ignore-case -u | perl -ne '/^((?=^.{1,255})[a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})*)/ && print "$1\n"' > ./community/data/cn
           cat temp-cn.txt | sort --ignore-case -u | perl -ne 'print if not /^((?=^.{3,255})[a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})+)/' > direct-tld-list.txt
@@ -137,16 +204,16 @@ jobs:
           cat temp-category-ads-all.txt | sort --ignore-case -u | perl -ne '/^((?=^.{1,255})[a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})*)/ && print "$1\n"' > ./community/data/category-ads-all
           cat temp-category-ads-all.txt | sort --ignore-case -u | perl -ne 'print if not /^((?=^.{3,255})[a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})+)/' > reject-tld-list.txt
 
-      - name: Add `full`, `regexp` and `keyword` type of rules back into "cn", "geolocation-!cn" and "category-ads-all" list
+      - name: 将 `full`、`regexp` 和 `keyword` 类型规则添加回 "cn"、"geolocation-!cn" 和 "category-ads-all" 列表
         run: |
-          [ -f "direct-reserve.txt" ] && cat direct-reserve.txt >> ./community/data/cn
-          [ -f "proxy-reserve.txt" ] && cat proxy-reserve.txt >> ./community/data/geolocation-\!cn
-          [ -f "reject-reserve.txt" ] && cat reject-reserve.txt >> ./community/data/category-ads-all
+          [ -f "direct-reserve.txt" ] && cat direct-reserve.txt | sort --ignore-case -u >> ./community/data/cn
+          [ -f "proxy-reserve.txt" ] && cat proxy-reserve.txt | sort --ignore-case -u >> ./community/data/geolocation-\!cn
+          [ -f "reject-reserve.txt" ] && cat reject-reserve.txt | sort --ignore-case -u >> ./community/data/category-ads-all
           cp ./community/data/cn direct-list.txt
           cp ./community/data/geolocation-\!cn proxy-list.txt
           cp ./community/data/category-ads-all reject-list.txt
 
-      - name: Create `china-list`、`google-cn`、`apple-cn`、`gfw`、`greatfire` lists
+      - name: 创建 `china-list`、`google-cn`、`apple-cn`、`gfw`、`greatfire` 等列表
         run: |
           curl -sSL $CHINA_DOMAINS_URL | perl -ne '/^server=\/([^\/]+)\// && print "$1\n"' > ./community/data/china-list
           curl -sSL $CHINA_DOMAINS_URL | perl -ne '/^server=\/([^\/]+)\// && print "$1\n"' > china-list.txt
@@ -164,12 +231,12 @@ jobs:
           curl -sSL $WIN_EXTRA | grep "0.0.0.0" | awk '{print $2}' > ./community/data/win-extra
           curl -sSL $WIN_EXTRA | grep "0.0.0.0" | awk '{print $2}' > win-extra.txt
 
-      - name: Build geosite.dat file
+      - name: 构建 geosite.dat 文件
         run: |
           cd custom || exit 1
           go run ./ --datapath=../community/data
 
-      - name: Move and zip files and generate sha256 hash
+      - name: 移动并压缩文件，生成 sha256 哈希
         run: |
           install -Dp ./geoip.dat ./publish/geoip.dat
           install -Dp ./geoip.dat.sha256sum ./publish/geoip.dat.sha256sum
@@ -182,7 +249,7 @@ jobs:
           sha256sum geosite.dat > geosite.dat.sha256sum
           sha256sum rules.zip > rules.zip.sha256sum
 
-      - name: Release and upload assets
+      - name: 发布并上传资源
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
@@ -191,7 +258,7 @@ jobs:
           file_glob: true
           file: ./publish/*
 
-      - name: Git push assets to "release" branch
+      - name: 将资源推送到 'release' 分支
         run: |
           cd publish || exit 1
           git init
@@ -203,7 +270,7 @@ jobs:
           git remote add origin "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
           git push -f -u origin release
 
-      - name: Purge jsdelivr CDN
+      - name: 清理 jsdelivr CDN 缓存
         run: |
           cd publish || exit 1
           for file in $(ls); do

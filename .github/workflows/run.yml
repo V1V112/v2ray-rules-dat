@@ -18,6 +18,7 @@ jobs:
           echo "RELEASE_NAME=Released on $(date +%Y%m%d%H%M)" >> $GITHUB_ENV
           echo "TAG_NAME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
           # 定义需要强制加入代理列表的 v2fly 社区规则分类，用空格分隔
+          # 这些分类的规则将同时被合并入 proxy-list (geolocation-!cn) 且独立生成文件。
           echo "CUSTOM_PROXY_GROUP=github pinterest" >> $GITHUB_ENV
           
           echo "CHINA_DOMAINS_URL=https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/accelerated-domains.china.conf" >> $GITHUB_ENV
@@ -92,8 +93,6 @@ jobs:
               
               filepath = os.path.join(base_dir, filename)
               if not os.path.exists(filepath):
-                  # This debug output helps verify which files are missing
-                  print(f"# WARN: Included file not found: {filename}", file=sys.stderr)
                   return
 
               with open(filepath, 'r', encoding='utf-8') as f:
@@ -118,7 +117,6 @@ jobs:
           cd gfwlist2dnsmasq || exit 1
           chmod +x ./gfwlist2dnsmasq.sh
           ./gfwlist2dnsmasq.sh -l -o ./temp-gfwlist.txt
-          cd .. # 切换回根目录
 
       - name: Get and add direct domains into temp-direct.txt file
         run: |
@@ -130,7 +128,7 @@ jobs:
           curl -sSL ${CUSTOM_DIRECT} | perl -ne '/^((full|regexp|keyword):[^:]+)(\n$|:@.+)/ && print "$1\n"' | sort --ignore-case -u > direct-reserve.txt
           curl -sSL ${CUSTOM_PROXY} | grep -Ev ":@cn" | perl -ne '/^((full|regexp|keyword):[^:]+)(\n$|:@.+)/ && print "$1\n"' | sort --ignore-case -u > proxy-reserve.txt
 
-      - name: Get and add proxy domains into temp-proxy.txt file
+      - name: Get and add proxy domains into temp-proxy.txt file and generate independent category files
         run: |
           # 1. GFWList
           cat ./gfwlist2dnsmasq/temp-gfwlist.txt | perl -ne '/^((?=^.{3,255})[a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})+)/ && print "$1\n"' > temp-proxy.txt
@@ -143,34 +141,26 @@ jobs:
           curl -sSL ${CUSTOM_PROXY} | grep -Ev ":@cn" | perl -ne '/^(domain):([^:]+)(\n$|:@.+)/ && print "$2\n"' >> temp-proxy.txt
 
           # 4. Process Custom Proxy Categories (e.g., GitHub, Pinterest) with Recursive Include
-          echo "--- Processing Custom V2Fly Categories: $CUSTOM_PROXY_GROUP ---"
-          touch temp-custom-v2fly.txt
-          
-          # 确保 resolve-includes.py 存在
-          if [ ! -f "resolve-includes.py" ]; then
-            echo "FATAL: resolve-includes.py not found!"
-            exit 1
-          fi
-
           for category in $CUSTOM_PROXY_GROUP; do
             echo "Processing category: $category"
-            # 使用 python3 执行脚本，并将解析后的规则输出到临时文件
-            python3 resolve-includes.py ./community/data "$category" >> temp-custom-v2fly.txt
+            
+            # A. Resolve includes and output to temp file
+            python3 resolve-includes.py ./community/data "$category" > ./temp-category-$category.txt
+            
+            # B. Copy the complete rules (for geosite.dat)
+            cp ./temp-category-$category.txt ./community/data/$category
+            
+            # C. Copy the complete rules for output .txt file (e.g., github.txt)
+            cp ./temp-category-$category.txt ./$category.txt
+
+            # D. Extract pure domains and append to the main proxy list (temp-proxy.txt)
+            cat ./temp-category-$category.txt | perl -ne '/^((?=^.{3,255})[a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})+)$/ && print "$1\n"' >> temp-proxy.txt
+            
+            # E. Extract special rules (full, regexp, keyword) and append to proxy-reserve.txt
+            cat ./temp-category-$category.txt | perl -ne '/^((full|regexp|keyword):[^:]+)(\n$|:@.+)/ && print "$1\n"' >> proxy-reserve.txt
+            
+            rm ./temp-category-$category.txt
           done
-          
-          # 检查是否提取到任何自定义规则
-          echo "Total raw rules extracted from custom categories:"
-          wc -l temp-custom-v2fly.txt
-          
-          # 4.1 Extract pure domains from custom v2fly categories to temp-proxy.txt
-          # 过滤出纯域名（不包含 full:/regexp:/keyword: 等前缀的行）
-          cat temp-custom-v2fly.txt | perl -ne '/^((?=^.{3,255})[a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})+)$/ && print "$1\n"' >> temp-proxy.txt
-          
-          # 4.2 Extract special rules (full, regexp, keyword) from custom v2fly categories to proxy-reserve.txt
-          cat temp-custom-v2fly.txt | perl -ne '/^((full|regexp|keyword):[^:]+)(\n$|:@.+)/ && print "$1\n"' >> proxy-reserve.txt
-          
-          echo "Total pure domains appended to temp-proxy.txt:"
-          wc -l temp-proxy.txt
 
       - name: Get and add reject domains into temp-reject.txt file
         run: |
@@ -262,8 +252,15 @@ jobs:
           install -p {proxy,direct,reject}-tld-list.txt ./publish/
           install -p {proxy,direct,reject}-list.txt ./publish/
           install -p {china-list,apple-cn,google-cn,gfw,greatfire,win-spy,win-update,win-extra}.txt ./publish/
+          
+          # Add custom categories to publish step (e.g., github.txt, pinterest.txt)
+          for category in $CUSTOM_PROXY_GROUP; do
+            install -p ./$category.txt ./publish/
+          done
+
           cd ./publish || exit 1
-          zip rules.zip {proxy,direct,reject}-list.txt geoip.dat geosite.dat
+          # Update zip command to include custom category files
+          zip rules.zip {proxy,direct,reject}-list.txt geoip.dat geosite.dat *.txt
           sha256sum geosite.dat > geosite.dat.sha256sum
           sha256sum rules.zip > rules.zip.sha256sum
 

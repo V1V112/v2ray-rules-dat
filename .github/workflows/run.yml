@@ -133,15 +133,15 @@ jobs:
       - name: 获取并将直连域名添加到临时直连文件
         run: |
           curl -sSL $CHINA_DOMAINS_URL | perl -ne '/^server=\/([^\/]+)\// && print "$1\n"' > temp-direct.txt
-          # 更新: 先剔除属性，再提取纯域名
-          curl -sSL ${CUSTOM_DIRECT} | perl -pe 's/:@\S+//g' | perl -ne '/^(domain:)?([a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})+)$/ && print "$2\n"' >> temp-direct.txt
+          # 更新: 使用 grep -v "@" 剔除包含属性的整行
+          curl -sSL ${CUSTOM_DIRECT} | grep -v "@" | perl -ne '/^(domain:)?([a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})+)$/ && print "$2\n"' >> temp-direct.txt
 
       # 步骤 11: 从自定义列表中保留 `full`、`regexp` 和 `keyword` 类型的规则到"保留"文件
       - name: 从自定义列表中保留特定类型的规则到“保留”文件
         run: |
-          # 更新: 仅移除 :@attribute，保留 full/regexp/keyword 前缀
-          curl -sSL ${CUSTOM_DIRECT} | perl -pe 's/:@\S+//g' | perl -ne '/^((full|regexp|keyword):.+)$/ && print "$1\n"' | sort --ignore-case -u > direct-reserve.txt
-          curl -sSL ${CUSTOM_PROXY} | grep -Ev ":@cn" | perl -pe 's/:@\S+//g' | perl -ne '/^((full|regexp|keyword):.+)$/ && print "$1\n"' | sort --ignore-case -u > proxy-reserve.txt
+          # 更新: 使用 grep -v "@" 剔除整行，确保不保留带属性的规则
+          curl -sSL ${CUSTOM_DIRECT} | grep -v "@" | perl -ne '/^((full|regexp|keyword):.+)$/ && print "$1\n"' | sort --ignore-case -u > direct-reserve.txt
+          curl -sSL ${CUSTOM_PROXY} | grep -v "@" | grep -Ev ":@cn" | perl -ne '/^((full|regexp|keyword):.+)$/ && print "$1\n"' | sort --ignore-case -u > proxy-reserve.txt
 
       # 步骤 12: 获取代理域名并生成独立分类文件
       - name: 获取代理域名并生成独立分类文件
@@ -153,8 +153,8 @@ jobs:
           curl -sSL $GOOGLE_DOMAINS_URL | perl -ne '/^server=\/([^\/]+)\// && print "$1\n"' >> temp-proxy.txt
           curl -sSL $APPLE_DOMAINS_URL | perl -ne '/^server=\/([^\/]+)\// && print "$1\n"' >> temp-proxy.txt
           
-          # 3. 从 URL 获取的自定义代理列表 (去除 @cn, 去除属性后提取纯域名)
-          curl -sSL ${CUSTOM_PROXY} | grep -Ev ":@ad" | perl -pe 's/:@\S+//g' | perl -ne '/^(domain:)?([a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})+)$/ && print "$2\n"' >> temp-proxy.txt
+          # 3. 从 URL 获取的自定义代理列表 (剔除带 @ 的行，剔除 @cn)
+          curl -sSL ${CUSTOM_PROXY} | grep -v "@" | grep -Ev ":@cn" | perl -ne '/^(domain:)?([a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})+)$/ && print "$2\n"' >> temp-proxy.txt
 
           # 4. 处理自定义代理分类（例如 GitHub, Pinterest），使用递归包含
           for category in $CUSTOM_PROXY_GROUP; do
@@ -164,24 +164,26 @@ jobs:
             python3 resolve-includes.py ./community/data "$category" > ./temp-category-$category.txt
             
             # B. 复制完整规则（带属性）到 community/data，供 geosite.dat 生成器使用
-            #    这样 geosite.dat 依然支持 geosite:google@ads 这种过滤
+            #    geosite.dat 构建器可能需要属性标签来生成正确的二进制文件
             cp ./temp-category-$category.txt ./community/data/$category
             
-            # C. 复制完整规则用于输出 .txt 文件（这里也先不处理，后面统一在打包前处理或保持原样）
-            #    如果希望 github.txt 也是干净的（无属性），可以在这里处理。
-            #    根据需求，这里我们生成一个干净版本用于文本输出：
-            cat ./temp-category-$category.txt | perl -pe 's/:@\S+//g' > ./$category.txt
+            # --- 以下步骤均使用“清洗后”的数据（剔除带 @ 属性的整行） ---
+            
+            # 生成不含属性行的临时清洗文件
+            cat ./temp-category-$category.txt | grep -v "@" > ./temp-category-$category-clean.txt
 
-            # D. 提取纯域名并追加到主代理列表 (temp-proxy.txt)
-            #    关键修改：先剔除属性 (s/:@\S+//g)，再匹配纯域名
-            #    这样 domain.com:@ads 会变成 domain.com 并被匹配成功
-            cat ./temp-category-$category.txt | perl -pe 's/:@\S+//g' | perl -ne '/^([a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})+)$/ && print "$1\n"' >> temp-proxy.txt
+            # C. 输出 .txt 文件 (不含属性行)
+            cp ./temp-category-$category-clean.txt ./$category.txt
+
+            # D. 提取纯域名并追加到主代理列表
+            cat ./temp-category-$category-clean.txt | perl -ne '/^([a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})+)$/ && print "$1\n"' >> temp-proxy.txt
             
             # E. 提取特殊规则（full, regexp, keyword）并追加到 proxy-reserve.txt
-            #    关键修改：先剔除属性，保留前缀
-            cat ./temp-category-$category.txt | perl -pe 's/:@\S+//g' | perl -ne '/^((full|regexp|keyword):.+)$/ && print "$1\n"' >> proxy-reserve.txt
+            cat ./temp-category-$category-clean.txt | perl -ne '/^((full|regexp|keyword):.+)$/ && print "$1\n"' >> proxy-reserve.txt
             
+            # 清理临时文件
             rm ./temp-category-$category.txt
+            rm ./temp-category-$category-clean.txt
           done
 
       # 步骤 13: 获取拒绝连接的域名
@@ -315,17 +317,4 @@ jobs:
           cd publish || exit 1
           git init
           git config --local user.name "github-actions[bot]"
-          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b release
-          git add .
-          git commit -m "${{ env.RELEASE_NAME }}"
-          git remote add origin "https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
-          git push -f -u origin release
-
-      # 步骤 25: 清理 jsdelivr CDN 缓存
-      - name: 清理 jsdelivr CDN 缓存
-        run: |
-          cd publish || exit 1
-          for file in $(ls); do
-            curl -i "https://purge.jsdelivr.net/gh/${{ github.repository }}@release/${file}"
-          done
+          git config --local user.email "418982

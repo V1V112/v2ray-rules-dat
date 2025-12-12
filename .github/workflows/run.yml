@@ -129,19 +129,18 @@ jobs:
           chmod +x ./gfwlist2dnsmasq.sh
           ./gfwlist2dnsmasq.sh -l -o ./temp-gfwlist.txt
 
-      # 步骤 10: 获取直连域名并添加到临时直连文件
+      # 步骤 10: 获取直连域名并添加到临时直连列表
       - name: 获取并将直连域名添加到临时直连文件
         run: |
           curl -sSL $CHINA_DOMAINS_URL | perl -ne '/^server=\/([^\/]+)\// && print "$1\n"' > temp-direct.txt
-          # 更新: 先剔除属性，再提取纯域名
-          curl -sSL ${CUSTOM_DIRECT} | perl -pe 's/:@\S+//g' | perl -ne '/^(domain:)?([a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})+)$/ && print "$2\n"' >> temp-direct.txt
+          curl -sSL ${CUSTOM_DIRECT} | perl -ne '/^(domain):([^:]+)(\n$|:@.+)/ && print "$2\n"' >> temp-direct.txt
 
       # 步骤 11: 从自定义列表中保留 `full`、`regexp` 和 `keyword` 类型的规则到"保留"文件
+      # 修改说明：增加了 perl -pe 's/[:@]@.*$//' 以去除 :@ads 等属性，但保留 full: 等前缀
       - name: 从自定义列表中保留特定类型的规则到“保留”文件
         run: |
-          # 更新: 仅移除 :@attribute，保留 full/regexp/keyword 前缀
-          curl -sSL ${CUSTOM_DIRECT} | perl -pe 's/:@\S+//g' | perl -ne '/^((full|regexp|keyword):.+)$/ && print "$1\n"' | sort --ignore-case -u > direct-reserve.txt
-          curl -sSL ${CUSTOM_PROXY} | grep -Ev ":@cn" | perl -pe 's/:@\S+//g' | perl -ne '/^((full|regexp|keyword):.+)$/ && print "$1\n"' | sort --ignore-case -u > proxy-reserve.txt
+          curl -sSL ${CUSTOM_DIRECT} | perl -pe 's/[:@]@.*$//' | perl -ne '/^((full|regexp|keyword):[^:]+)$/ && print "$1\n"' | sort --ignore-case -u > direct-reserve.txt
+          curl -sSL ${CUSTOM_PROXY} | grep -Ev ":@cn" | perl -pe 's/[:@]@.*$//' | perl -ne '/^((full|regexp|keyword):[^:]+)$/ && print "$1\n"' | sort --ignore-case -u > proxy-reserve.txt
 
       # 步骤 12: 获取代理域名并生成独立分类文件
       - name: 获取代理域名并生成独立分类文件
@@ -153,33 +152,29 @@ jobs:
           curl -sSL $GOOGLE_DOMAINS_URL | perl -ne '/^server=\/([^\/]+)\// && print "$1\n"' >> temp-proxy.txt
           curl -sSL $APPLE_DOMAINS_URL | perl -ne '/^server=\/([^\/]+)\// && print "$1\n"' >> temp-proxy.txt
           
-          # 3. 从 URL 获取的自定义代理列表 (去除 @cn, 去除属性后提取纯域名)
-          curl -sSL ${CUSTOM_PROXY} | grep -Ev ":@cn" | perl -pe 's/:@\S+//g' | perl -ne '/^(domain:)?([a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})+)$/ && print "$2\n"' >> temp-proxy.txt
+          # 3. 从 URL 获取的自定义代理列表
+          curl -sSL ${CUSTOM_PROXY} | grep -Ev ":@cn" | perl -ne '/^(domain):([^:]+)(\n$|:@.+)/ && print "$2\n"' >> temp-proxy.txt
 
           # 4. 处理自定义代理分类（例如 GitHub, Pinterest），使用递归包含
           for category in $CUSTOM_PROXY_GROUP; do
             echo "正在处理分类: $category"
             
-            # A. 解析包含并输出到临时文件 (包含所有属性，用于 geosite.dat 构建)
+            # A. 解析包含并输出到临时文件
             python3 resolve-includes.py ./community/data "$category" > ./temp-category-$category.txt
             
-            # B. 复制完整规则（带属性）到 community/data，供 geosite.dat 生成器使用
-            #    这样 geosite.dat 依然支持 geosite:google@ads 这种过滤
+            # B. 复制完整规则（用于生成 geosite.dat，保持原样以支持 geosite 构建器的属性逻辑）
             cp ./temp-category-$category.txt ./community/data/$category
             
-            # C. 复制完整规则用于输出 .txt 文件（这里也先不处理，后面统一在打包前处理或保持原样）
-            #    如果希望 github.txt 也是干净的（无属性），可以在这里处理。
-            #    根据需求，这里我们生成一个干净版本用于文本输出：
-            cat ./temp-category-$category.txt | perl -pe 's/:@\S+//g' > ./$category.txt
+            # C. 复制完整规则用于输出 .txt 文件（这里可以保持原样，或者也去掉属性，视需求而定，这里暂不处理）
+            cp ./temp-category-$category.txt ./$category.txt
 
             # D. 提取纯域名并追加到主代理列表 (temp-proxy.txt)
-            #    关键修改：先剔除属性 (s/:@\S+//g)，再匹配纯域名
-            #    这样 domain.com:@ads 会变成 domain.com 并被匹配成功
-            cat ./temp-category-$category.txt | perl -pe 's/:@\S+//g' | perl -ne '/^([a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})+)$/ && print "$1\n"' >> temp-proxy.txt
+            # 修改：允许行尾有属性，但提取时忽略属性
+            cat ./temp-category-$category.txt | perl -pe 's/[:@]@.*$//' | perl -ne '/^((?=^.{3,255})[a-zA-Z0-9][-_a-zA-Z0-9]{0,62}(\.[a-zA-Z0-9][-_a-zA-Z0-9]{0,62})+)$/ && print "$1\n"' >> temp-proxy.txt
             
             # E. 提取特殊规则（full, regexp, keyword）并追加到 proxy-reserve.txt
-            #    关键修改：先剔除属性，保留前缀
-            cat ./temp-category-$category.txt | perl -pe 's/:@\S+//g' | perl -ne '/^((full|regexp|keyword):.+)$/ && print "$1\n"' >> proxy-reserve.txt
+            # 修改：剥离属性 :@ads，保留 full: 前缀
+            cat ./temp-category-$category.txt | perl -pe 's/[:@]@.*$//' | perl -ne '/^((full|regexp|keyword):.+)$/ && print "$1\n"' >> proxy-reserve.txt
             
             rm ./temp-category-$category.txt
           done

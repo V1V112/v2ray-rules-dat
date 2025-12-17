@@ -20,7 +20,7 @@ jobs:
           echo "TAG_NAME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
           # 定义需要强制加入代理列表的 v2fly 社区规则分类，用空格分隔
           # 这些分类的规则将同时被合并入 proxy-list (geolocation-!cn) 且独立生成文件。
-          echo "CUSTOM_PROXY_GROUP=github pinterest" >> $GITHUB_ENV
+          echo "CUSTOM_PROXY_GROUP=github pinterest pikpak" >> $GITHUB_ENV
           
           # 定义各种规则列表的下载 URL
           echo "CHINA_DOMAINS_URL=https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/accelerated-domains.china.conf" >> $GITHUB_ENV
